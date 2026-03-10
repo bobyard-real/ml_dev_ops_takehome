@@ -1,6 +1,6 @@
 # ml_dev_ops_takehome
 
-Minimal Django app with a real ONNX image classifier and a synchronous inference endpoint.
+Minimal Django app with a ONNX image classifier and a synchronous inference endpoint.
 
 ## Requirements
 
@@ -11,15 +11,14 @@ Minimal Django app with a real ONNX image classifier and a synchronous inference
 From the project root:
 
 ```bash
-./run_app.sh
+bash run_app.sh
 ```
 
 What the script does:
 
-- finds a Python 3.12+ interpreter or fails with install instructions
 - creates `.venv` if it does not exist
-- installs the packages in `requirements.txt`
-- downloads the SqueezeNet 1.1 ONNX model and ImageNet label file if they are missing
+- installs the packages 
+- downloads the SqueezeNet 1.1 ONNX model and ImageNet label file 
 - starts Django on `127.0.0.1:8000`
 
 Optional environment variables:
@@ -76,8 +75,3 @@ Example response:
 }
 ```
 
-## Notes
-
-- This starter app does not include CI/CD, infrastructure as code, or monitoring.
-- The classifier runs real ONNX inference using SqueezeNet 1.1 through `onnxruntime`.
-- The first startup downloads about 5 MB of model data plus the ImageNet label file into `inference/model_assets/`.
