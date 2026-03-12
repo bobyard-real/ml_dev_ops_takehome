@@ -1,0 +1,16 @@
+aws_region      = "us-east-1"
+app_name        = "ml-inference"
+container_port  = 8000
+cpu             = 512
+memory          = 1024
+desired_count   = 1
+environment     = "prod"
+autoscaling_min = 1
+autoscaling_max = 4
+
+# Deploy a specific environment:
+#   terraform plan -var-file=environments/prod.tfvars
+#   terraform plan -var-file=environments/staging.tfvars
+#
+# Initialize with per-env state:
+#   terraform init -backend-config="key=infra/staging/terraform.tfstate"
