@@ -17,6 +17,20 @@ locals {
   name_prefix = "${var.app_name}-${var.environment}"
 }
 
+# ---------- ECR Repository ----------
+
+resource "aws_ecr_repository" "main" {
+  name                 = var.app_name
+  image_tag_mutability = "MUTABLE"
+  force_delete         = true
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  tags = { Name = "${local.name_prefix}-ecr" }
+}
+
 # ---------- Data sources: default VPC + subnets ----------
 
 data "aws_vpc" "default" {
@@ -193,7 +207,7 @@ resource "aws_ecs_task_definition" "main" {
   container_definitions = jsonencode([
     {
       name      = var.app_name
-      image     = var.container_image
+      image     = "${aws_ecr_repository.main.repository_url}:latest"
       essential = true
 
       portMappings = [

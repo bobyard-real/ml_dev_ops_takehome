@@ -10,11 +10,6 @@ variable "app_name" {
   default     = "ml-inference"
 }
 
-variable "container_image" {
-  description = "Docker image URI for the inference service"
-  type        = string
-}
-
 variable "container_port" {
   description = "Port the container listens on"
   type        = number
