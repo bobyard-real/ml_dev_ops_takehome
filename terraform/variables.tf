@@ -39,3 +39,15 @@ variable "environment" {
   type        = string
   default     = "prod"
 }
+
+variable "autoscaling_min" {
+  description = "Minimum number of ECS tasks"
+  type        = number
+  default     = 1
+}
+
+variable "autoscaling_max" {
+  description = "Maximum number of ECS tasks"
+  type        = number
+  default     = 4
+}
