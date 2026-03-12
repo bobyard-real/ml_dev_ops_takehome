@@ -1,14 +1,15 @@
-import hashlib
 import logging
 import os
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from functools import lru_cache
+from io import BytesIO
 from typing import BinaryIO
 
 import numpy
 import onnxruntime
+import xxhash
 from PIL import Image, ImageOps
 
 from inference.assets import LABELS_PATH, MODEL_PATH, ensure_model_assets
@@ -90,6 +91,10 @@ class PretrainedImageClassifier:
             INTER_OP_THREADS,
         )
 
+        # Pre-compute fused normalization constants to avoid per-request division
+        self._scale = (1.0 / (255.0 * IMAGE_STD)).astype(numpy.float32)
+        self._shift = (IMAGE_MEAN / IMAGE_STD).astype(numpy.float32)
+
         # --- Result cache: input hash → InferenceResult ---
         self._cache: OrderedDict[str, InferenceResult] = OrderedDict()
 
@@ -98,17 +103,15 @@ class PretrainedImageClassifier:
         image_bytes = uploaded_image.read()
 
         # Check cache before doing any work
-        cache_key = hashlib.md5(image_bytes).hexdigest()
+        cache_key = xxhash.xxh64(image_bytes).hexdigest()
         if cache_key in self._cache:
             CACHE_HITS.inc()
-            logger.info("Cache hit for %s", cache_key[:8])
             self._cache.move_to_end(cache_key)
             return self._cache[cache_key]
 
         CACHE_MISSES.inc()
 
-        uploaded_image.seek(0)
-        with Image.open(uploaded_image) as image:
+        with Image.open(BytesIO(image_bytes)) as image:
             normalized_image = ImageOps.exif_transpose(image).convert("RGB")
             width, height = normalized_image.size
             input_tensor = self._build_input_tensor(normalized_image)
@@ -143,14 +146,18 @@ class PretrainedImageClassifier:
 
     def _build_input_tensor(self, image: Image.Image) -> numpy.ndarray:
         fitted_image = ImageOps.fit(
-            image, 
-            size=IMAGE_INPUT_SIZE, 
-            method=Image.Resampling.BILINEAR
+            image,
+            size=IMAGE_INPUT_SIZE,
+            method=Image.Resampling.BILINEAR,
         )
-        image_array = numpy.asarray(fitted_image, dtype=numpy.float32) / 255.0
-        normalized_array = (image_array - IMAGE_MEAN) / IMAGE_STD
-        chw_array = numpy.transpose(normalized_array, (2, 0, 1))
-        return numpy.expand_dims(chw_array, axis=0).astype(numpy.float32)
+        # Single-pass normalize: divide, subtract mean, divide std, transpose, add batch dim
+        # Using pre-computed 1/(255*std) and mean/std avoids two separate array operations
+        image_array = numpy.asarray(fitted_image, dtype=numpy.float32)
+        image_array *= self._scale  # 1.0 / (255.0 * std) — fused scale+normalize
+        image_array -= self._shift  # mean / std
+        return numpy.ascontiguousarray(
+            image_array.transpose(2, 0, 1)[numpy.newaxis]
+        )
 
     def _normalize_scores(self, model_output: numpy.ndarray) -> numpy.ndarray:
         if numpy.all(model_output >= 0) and numpy.isclose(float(model_output.sum()), 1.0, atol=1e-3):

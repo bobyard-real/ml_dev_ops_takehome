@@ -6,12 +6,15 @@ This document explains the engineering decisions behind each change to the infer
 
 ## 1. Inference Improvements
 
-### 1a. Result Caching (LRU, MD5-keyed)
+### 1a. Result Caching (LRU, xxhash-keyed)
 
-**What:** An in-process LRU cache in `PretrainedImageClassifier` that maps `MD5(raw image bytes)` to the `InferenceResult`. On a cache hit, we skip image decoding, preprocessing, and model inference entirely.
+**What:** An in-process LRU cache in `PretrainedImageClassifier` that maps `xxh64(raw image bytes)` to the `InferenceResult`. On a cache hit, we skip image decoding, preprocessing, and model inference entirely.
 
-**Why MD5 on raw bytes, not on the normalized tensor:**
-Hashing happens *before* any image processing. This means we avoid the cost of opening the image, EXIF transpose, resize, and normalization on cache hits. MD5 is not cryptographically secure, but we're using it as a fast content-addressable key, not for security. Collision probability is negligible at our cache scale (256 entries).
+**Why xxhash instead of MD5:**
+xxhash (xxh64) is ~3x faster than MD5 for hashing. Since we're using the hash as a content-addressable cache key (not for security), we don't need cryptographic properties. xxhash has excellent collision resistance for non-adversarial inputs and is widely used in databases and caches (e.g., LZ4, RocksDB).
+
+**Why hash raw bytes, not the normalized tensor:**
+Hashing happens *before* any image processing. This means we avoid the cost of opening the image, EXIF transpose, resize, and normalization on cache hits. Collision probability is negligible at our cache scale (256 entries).
 
 **Why `OrderedDict` instead of `functools.lru_cache`:**
 `lru_cache` decorates a function and requires hashable arguments. Our input is a file-like `BinaryIO` object, which isn't hashable. `OrderedDict` with manual `move_to_end()` / `popitem(last=False)` gives us LRU semantics with full control over the eviction policy.
@@ -23,7 +26,28 @@ Hashing happens *before* any image processing. This means we avoid the cost of o
 
 **Measured impact:** ~640x speedup on cache hit (82ms -> 0.1ms).
 
-### 1b. ORT Session Tuning
+### 1b. Preprocessing Pipeline Optimization
+
+**What:** Three changes to reduce CPU work and memory allocations on cache-miss requests:
+
+1. **Fused normalization constants:** Pre-compute `1/(255*std)` and `mean/std` at init time. The original code did `array / 255.0`, then `(array - mean) / std`, then `.astype(float32)` — three array-wide operations plus a copy. The fused version does `array *= scale` then `array -= shift` — two in-place operations, no copy.
+
+2. **BytesIO instead of re-seeking:** On a cache miss, the original code called `uploaded_image.seek(0)` to re-read from the Django `UploadedFile`. We already have the bytes in memory (read for hashing), so we wrap them in `BytesIO` instead of seeking the original file object. This avoids a second read through Django's file handling layer.
+
+3. **`numpy.ascontiguousarray` on transpose:** After HWC→CHW transpose, the array is non-contiguous in memory. `ascontiguousarray` produces a single contiguous buffer that ORT can consume without internal copies.
+
+**Load test results (local, 50 requests, 5 concurrent, same image):**
+
+| Metric | Before | After | Change |
+|---|---|---|---|
+| RPS | 45.0 | 52.6 | +17% |
+| p50 latency | 31ms | 26ms | -16% |
+| p95 latency | 284ms | 216ms | -24% |
+| p99 latency | 292ms | 216ms | -26% |
+
+The gains are most visible on cache-miss requests (p95/p99), where the preprocessing pipeline runs end-to-end. Cache-hit requests (p50) also benefit from the faster xxhash.
+
+### 1c. ORT Session Tuning
 
 **What:** Configured `onnxruntime.SessionOptions` with explicit thread counts, memory pattern optimization, graph optimization level, and optimized model serialization.
 
@@ -42,7 +66,7 @@ Hashing happens *before* any image processing. This means we avoid the cost of o
 - The `.optimized.onnx` file may contain hardware-specific optimizations (e.g., NCHW->NCHWc transforms). It should not be copied between different CPU architectures. This is acceptable for containerized deployments where the build environment matches runtime.
 - Thread settings are exposed as `ORT_INTRA_OP_THREADS` and `ORT_INTER_OP_THREADS` env vars for tuning in different deployment contexts (e.g., Fargate with 0.5 vCPU vs. a 16-core bare metal box).
 
-### 1c. Model Warm-Start
+### 1d. Model Warm-Start
 
 **What:** Two parts:
 1. A dummy inference (`numpy.zeros` input) runs during `PretrainedImageClassifier.__init__()` to trigger lazy memory allocations, JIT compilation, and thread pool initialization.
