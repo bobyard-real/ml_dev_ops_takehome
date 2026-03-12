@@ -1,3 +1,8 @@
 /.venv
 /.idea
 /inference/model_assets
+__pycache__/
+*.pyc
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/*.tfstate*
