@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import os
+import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from functools import lru_cache
@@ -11,6 +12,13 @@ import onnxruntime
 from PIL import Image, ImageOps
 
 from inference.assets import LABELS_PATH, MODEL_PATH, ensure_model_assets
+from inference.metrics import (
+    CACHE_HITS,
+    CACHE_MISSES,
+    CACHE_SIZE,
+    INFERENCE_LATENCY,
+    MODEL_LOADED,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -74,6 +82,7 @@ class PretrainedImageClassifier:
         # --- Warm-start: trigger lazy allocations before first real request ---
         dummy_input = numpy.zeros((1, 3, *IMAGE_INPUT_SIZE), dtype=numpy.float32)
         self.session.run(None, {self.input_name: dummy_input})
+        MODEL_LOADED.set(1)
         logger.info(
             "Model warm-start complete: %s (threads: intra=%d, inter=%d)",
             self.model_name,
@@ -91,9 +100,12 @@ class PretrainedImageClassifier:
         # Check cache before doing any work
         cache_key = hashlib.md5(image_bytes).hexdigest()
         if cache_key in self._cache:
+            CACHE_HITS.inc()
             logger.info("Cache hit for %s", cache_key[:8])
             self._cache.move_to_end(cache_key)
             return self._cache[cache_key]
+
+        CACHE_MISSES.inc()
 
         uploaded_image.seek(0)
         with Image.open(uploaded_image) as image:
@@ -101,7 +113,9 @@ class PretrainedImageClassifier:
             width, height = normalized_image.size
             input_tensor = self._build_input_tensor(normalized_image)
 
+        inf_start = time.monotonic()
         raw_output = self.session.run(None, {self.input_name: input_tensor})[0]
+        INFERENCE_LATENCY.observe(time.monotonic() - inf_start)
         scores = self._normalize_scores(numpy.asarray(raw_output).squeeze())
         top_indices = numpy.argsort(scores)[-3:][::-1]
         predictions = [
@@ -123,6 +137,7 @@ class PretrainedImageClassifier:
         self._cache[cache_key] = result
         if len(self._cache) > CACHE_MAX_SIZE:
             self._cache.popitem(last=False)
+        CACHE_SIZE.set(len(self._cache))
 
         return result
 
