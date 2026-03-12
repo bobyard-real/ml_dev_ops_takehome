@@ -13,7 +13,7 @@ terraform {
   #   terraform init -backend-config="key=infra/staging/terraform.tfstate"
   backend "s3" {
     bucket         = "ml-inference-tfstate"
-    key            = "infra/prod/terraform.tfstate" # overridden per env via -backend-config
+    key            = "infra/terraform.tfstate" # override per env via -backend-config
     region         = "us-east-1"
     dynamodb_table = "ml-inference-tflock"
     encrypt        = true
