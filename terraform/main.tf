@@ -218,7 +218,7 @@ resource "aws_ecs_task_definition" "main" {
   container_definitions = jsonencode([
     {
       name      = var.app_name
-      image     = "${aws_ecr_repository.main.repository_url}:latest"
+      image     = "${aws_ecr_repository.main.repository_url}:${var.image_tag}"
       essential = true
 
       portMappings = [
@@ -277,6 +277,11 @@ resource "aws_ecs_service" "main" {
     target_group_arn = aws_lb_target_group.main.arn
     container_name   = var.app_name
     container_port   = var.container_port
+  }
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
   }
 
   depends_on = [aws_lb_listener.http]

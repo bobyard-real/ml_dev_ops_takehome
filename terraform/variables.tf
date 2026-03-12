@@ -40,6 +40,12 @@ variable "environment" {
   default     = "prod"
 }
 
+variable "image_tag" {
+  description = "Docker image tag to deploy (git SHA or 'latest')"
+  type        = string
+  default     = "latest"
+}
+
 variable "autoscaling_min" {
   description = "Minimum number of ECS tasks"
   type        = number
