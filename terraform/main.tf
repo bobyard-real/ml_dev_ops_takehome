@@ -7,6 +7,14 @@ terraform {
       version = "~> 5.0"
     }
   }
+
+  backend "s3" {
+    bucket         = "ml-inference-tfstate"
+    key            = "infra/terraform.tfstate"
+    region         = "us-east-1"
+    dynamodb_table = "ml-inference-tflock"
+    encrypt        = true
+  }
 }
 
 provider "aws" {
