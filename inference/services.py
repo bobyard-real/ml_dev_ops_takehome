@@ -1,3 +1,7 @@
+import hashlib
+import logging
+import os
+from collections import OrderedDict
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import BinaryIO
@@ -9,9 +13,18 @@ from PIL import Image, ImageOps
 from inference.assets import LABELS_PATH, MODEL_PATH, ensure_model_assets
 
 
+logger = logging.getLogger(__name__)
+
 IMAGE_INPUT_SIZE = (224, 224)
 IMAGE_MEAN = numpy.array([0.485, 0.456, 0.406], dtype=numpy.float32)
 IMAGE_STD = numpy.array([0.229, 0.224, 0.225], dtype=numpy.float32)
+
+# Cache config — tunable via environment variables
+CACHE_MAX_SIZE = int(os.environ.get("INFERENCE_CACHE_MAX_SIZE", "256"))
+
+# Thread config — defaults optimized for typical CPU deployment
+INTRA_OP_THREADS = int(os.environ.get("ORT_INTRA_OP_THREADS", "0"))  # 0 = ORT auto-detects
+INTER_OP_THREADS = int(os.environ.get("ORT_INTER_OP_THREADS", "1"))
 
 
 @dataclass(frozen=True)
@@ -37,13 +50,51 @@ class PretrainedImageClassifier:
             for label in LABELS_PATH.read_text().splitlines()
             if label.strip()
         )
+
+        # --- Session tuning ---
+        sess_options = onnxruntime.SessionOptions()
+        sess_options.intra_op_num_threads = INTRA_OP_THREADS
+        sess_options.inter_op_num_threads = INTER_OP_THREADS
+        sess_options.execution_mode = onnxruntime.ExecutionMode.ORT_SEQUENTIAL
+        sess_options.enable_mem_pattern = True
+        # Cache the optimized graph to disk so ORT skips re-optimization on next load
+        optimized_path = MODEL_PATH.with_suffix(".optimized.onnx")
+        sess_options.optimized_model_filepath = optimized_path.as_posix()
+        sess_options.graph_optimization_level = (
+            onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
+        )
+
         self.session = onnxruntime.InferenceSession(
             MODEL_PATH.as_posix(),
+            sess_options,
             providers=["CPUExecutionProvider"],
         )
         self.input_name = self.session.get_inputs()[0].name
 
+        # --- Warm-start: trigger lazy allocations before first real request ---
+        dummy_input = numpy.zeros((1, 3, *IMAGE_INPUT_SIZE), dtype=numpy.float32)
+        self.session.run(None, {self.input_name: dummy_input})
+        logger.info(
+            "Model warm-start complete: %s (threads: intra=%d, inter=%d)",
+            self.model_name,
+            INTRA_OP_THREADS,
+            INTER_OP_THREADS,
+        )
+
+        # --- Result cache: input hash → InferenceResult ---
+        self._cache: OrderedDict[str, InferenceResult] = OrderedDict()
+
     def classify(self, uploaded_image: BinaryIO) -> InferenceResult:
+        uploaded_image.seek(0)
+        image_bytes = uploaded_image.read()
+
+        # Check cache before doing any work
+        cache_key = hashlib.md5(image_bytes).hexdigest()
+        if cache_key in self._cache:
+            logger.info("Cache hit for %s", cache_key[:8])
+            self._cache.move_to_end(cache_key)
+            return self._cache[cache_key]
+
         uploaded_image.seek(0)
         with Image.open(uploaded_image) as image:
             normalized_image = ImageOps.exif_transpose(image).convert("RGB")
@@ -61,12 +112,19 @@ class PretrainedImageClassifier:
             for class_index in top_indices
         ]
 
-        return InferenceResult(
+        result = InferenceResult(
             model_name=self.model_name,
             tags=predictions,
             width=width,
             height=height,
         )
+
+        # Store in cache, evict oldest if full
+        self._cache[cache_key] = result
+        if len(self._cache) > CACHE_MAX_SIZE:
+            self._cache.popitem(last=False)
+
+        return result
 
     def _build_input_tensor(self, image: Image.Image) -> numpy.ndarray:
         fitted_image = ImageOps.fit(
