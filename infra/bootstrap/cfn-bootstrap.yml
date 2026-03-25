@@ -1,0 +1,241 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Terraform state backend + deployer credentials.
+  Creates the S3 bucket and DynamoDB table that Terraform uses for remote state,
+  plus an IAM user whose access key is stored in Secrets Manager.
+
+Parameters:
+  BucketName:
+    Type: String
+    Default: tf-state-ml-app
+    Description: S3 bucket name for Terraform state (must be globally unique — change the default)
+
+  TableName:
+    Type: String
+    Default: tf-state-lock
+    Description: DynamoDB table name for Terraform state locking
+
+  IamUserName:
+    Type: String
+    Default: terraform-deployer
+    Description: IAM username that Terraform will run as locally
+
+Resources:
+
+  # ── S3 — Terraform state bucket ──────────────────────────────────────────────
+  TerraformStateBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain          # never accidentally delete state
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref BucketName
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-old-versions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 90
+
+  TerraformStateBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref TerraformStateBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyNonTLS
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt TerraformStateBucket.Arn
+              - !Sub '${TerraformStateBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+
+  # ── DynamoDB — state lock table ───────────────────────────────────────────────
+  TerraformStateLockTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Ref TableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: LockID
+          AttributeType: S
+      KeySchema:
+        - AttributeName: LockID
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+
+  # ── IAM — Terraform deployer user ────────────────────────────────────────────
+  TerraformDeployerUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: !Ref IamUserName
+      Tags:
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # Broad policy scoped to the services Terraform manages in this project.
+  # Tighten resource ARNs after initial bootstrap if desired.
+  TerraformDeployerPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: TerraformDeployerPolicy
+      Users:
+        - !Ref TerraformDeployerUser
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # State backend access
+          - Sid: TerraformStateS3
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+              - s3:ListBucket
+              - s3:GetBucketVersioning
+            Resource:
+              - !GetAtt TerraformStateBucket.Arn
+              - !Sub '${TerraformStateBucket.Arn}/*'
+
+          - Sid: TerraformStateLock
+            Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:DeleteItem
+              - dynamodb:DescribeTable
+            Resource: !GetAtt TerraformStateLockTable.Arn
+
+          # ECR
+          - Sid: ECR
+            Effect: Allow
+            Action:
+              - ecr:*
+            Resource: '*'
+
+          # ECS
+          - Sid: ECS
+            Effect: Allow
+            Action:
+              - ecs:*
+            Resource: '*'
+
+          # IAM (needed to create roles/policies for ECS + GitHub OIDC)
+          - Sid: IAM
+            Effect: Allow
+            Action:
+              - iam:*
+            Resource: '*'
+
+          # VPC / networking / ALB
+          - Sid: Networking
+            Effect: Allow
+            Action:
+              - ec2:*
+              - elasticloadbalancing:*
+            Resource: '*'
+
+          # CloudWatch Logs (log groups for ECS)
+          - Sid: Logs
+            Effect: Allow
+            Action:
+              - logs:*
+            Resource: '*'
+
+          # ACM (TLS certificates for ALB HTTPS)
+          - Sid: ACM
+            Effect: Allow
+            Action:
+              - acm:*
+            Resource: '*'
+
+          # Route53 (DNS validation records + ALB alias records)
+          - Sid: Route53
+            Effect: Allow
+            Action:
+              - route53:*
+            Resource: '*'
+
+          # ElastiCache (Redis clusters, subnet groups, security group rules)
+          - Sid: ElastiCache
+            Effect: Allow
+            Action:
+              - elasticache:*
+            Resource: '*'
+
+          # CloudWatch Dashboards
+          - Sid: CloudWatchDashboards
+            Effect: Allow
+            Action:
+              - cloudwatch:PutDashboard
+              - cloudwatch:GetDashboard
+              - cloudwatch:DeleteDashboards
+              - cloudwatch:ListDashboards
+            Resource: '*'
+
+          # Secrets Manager (read-only; used if secrets are referenced in task defs)
+          - Sid: SecretsManagerRead
+            Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+              - secretsmanager:DescribeSecret
+              - secretsmanager:ListSecrets
+            Resource: '*'
+
+  TerraformDeployerAccessKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName: !Ref TerraformDeployerUser
+
+  # Store credentials in Secrets Manager so they're never in CF outputs in plaintext
+  TerraformDeployerSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: terraform-deployer-credentials
+      Description: Access key for the terraform-deployer IAM user
+      SecretString: !Sub |
+        {
+          "access_key_id": "${TerraformDeployerAccessKey}",
+          "secret_access_key": "${TerraformDeployerAccessKey.SecretAccessKey}"
+        }
+
+Outputs:
+  StateBucketName:
+    Description: S3 bucket for Terraform state — use in backend.tf
+    Value: !Ref TerraformStateBucket
+    Export:
+      Name: TerraformStateBucketName
+
+  LockTableName:
+    Description: DynamoDB table for state locking — use in backend.tf
+    Value: !Ref TerraformStateLockTable
+    Export:
+      Name: TerraformStateLockTableName
+
+  DeployerUserArn:
+    Description: ARN of the terraform-deployer IAM user
+    Value: !GetAtt TerraformDeployerUser.Arn
+
+  CredentialsSecretName:
+    Description: Secrets Manager secret holding the deployer access key + secret
+    Value: !Ref TerraformDeployerSecret
+    Export:
+      Name: TerraformDeployerSecretName

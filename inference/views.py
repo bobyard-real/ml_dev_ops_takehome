@@ -1,4 +1,5 @@
 import logging
+import time
 
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import render
@@ -7,6 +8,9 @@ from django.views.decorators.http import require_http_methods, require_POST
 
 from inference.forms import ImageUploadForm
 from inference.services import InferenceResult, get_pretrained_image_classifier
+from inference.telemetry import record_inference_metrics
+
+logger = logging.getLogger(__name__)
 
 
 def _serialize_result(result: InferenceResult) -> dict[str, object]:
@@ -32,12 +36,21 @@ def home(request: HttpRequest) -> HttpResponse:
     result_payload = None
 
     if request.method == "POST" and form.is_valid():
+        t0 = time.perf_counter()
         result = get_pretrained_image_classifier().classify(form.cleaned_data["image"])
+        total_ms = (time.perf_counter() - t0) * 1000
+
         result_payload = _serialize_result(result)
-        logging.info(
-            "Completed browser inference request model=%s tags=%s",
-            result.model_name,
-            ",".join(tag["label"] for tag in result_payload["tags"]),
+        record_inference_metrics(
+            total_ms=total_ms,
+            preprocessing_ms=result.preprocessing_ms,
+            model_ms=result.model_ms,
+            image_width=result.width,
+            image_height=result.height,
+            top_label=result.tags[0].label,
+            top_score=result.tags[0].score,
+            model_name=result.model_name,
+            source="browser",
         )
 
     return render(
@@ -56,16 +69,22 @@ def infer_image(request: HttpRequest) -> JsonResponse:
     form = ImageUploadForm(request.POST, request.FILES)
     if not form.is_valid():
         return JsonResponse({"errors": form.errors.get_json_data()}, status=400)
-    
-    image = form.cleaned_data["image"]
-    
-    result = get_pretrained_image_classifier().classify(image)
+
+    t0 = time.perf_counter()
+    result = get_pretrained_image_classifier().classify(form.cleaned_data["image"])
+    total_ms = (time.perf_counter() - t0) * 1000
+
     result_payload = _serialize_result(result)
-    
-    logging.info(
-        "Completed API inference request model=%s tags=%s",
-        result.model_name,
-        ",".join(tag["label"] for tag in result_payload["tags"]),
+    record_inference_metrics(
+        total_ms=total_ms,
+        preprocessing_ms=result.preprocessing_ms,
+        model_ms=result.model_ms,
+        image_width=result.width,
+        image_height=result.height,
+        top_label=result.tags[0].label,
+        top_score=result.tags[0].score,
+        model_name=result.model_name,
+        source="api",
     )
-    
+
     return JsonResponse(result_payload)
