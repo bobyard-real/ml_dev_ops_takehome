@@ -1,3 +1,9 @@
 /.venv
 /.idea
 /inference/model_assets
+
+# Terraform
+**/.terraform/
+**/*.tfstate
+**/*.tfstate.backup
+**/*.tfplan

@@ -25,7 +25,13 @@ SECRET_KEY = 'django-insecure-q#n0kex5ys09km_vrkwus*c4aqnuj*67@s-_sy)cu*0c-vz7b_
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['*']
+
+CSRF_TRUSTED_ORIGINS = [
+    'https://ml-app-dev.diyer.us',
+    'https://ml-app-staging.diyer.us',
+    'https://ml-app-prod.diyer.us',
+]
 
 
 # Application definition
@@ -118,3 +124,21 @@ USE_TZ = True
 STATIC_URL = 'static/'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "json": {
+            "()": "pythonjsonlogger.jsonlogger.JsonFormatter",
+            "format": "%(asctime)s %(levelname)s %(name)s %(message)s",
+        }
+    },
+    "handlers": {
+        "stdout": {
+            "class": "logging.StreamHandler",
+            "formatter": "json",
+        }
+    },
+    "root": {"handlers": ["stdout"], "level": "INFO"},
+}
